@@ -120,6 +120,7 @@ public:
 	void getHostPort(string &host, int &port) { host = hostName_; port = port_; }
     void setClientId(const std::string& clientId){runClientId_ = clientId;}
     DataInputStreamSP getDataInputStream(){return inputStream_;}
+    ConstantSP lowLatencyRequest(const string &funcName, const vector<ConstantSP> &args);
 private:
 	long generateRequestFlag(bool clearSessionMemory = false, bool disablepickle = false, bool pickleTableToList = false);
     ConstantSP run(const string& script, const string& scriptType, vector<ConstantSP>& args, int priority = 4, int parallelism = 2,int fetchSize = 0, bool clearMemory = false, long seqNum = 0);
@@ -984,6 +985,143 @@ long DBConnectionImpl::generateRequestFlag(bool clearSessionMemory, bool disable
 	return flag;
 }
 
+ 
+ConstantSP DBConnectionImpl::lowLatencyRequest(const string &funcName, const vector<ConstantSP> &args) {
+    if (!isConnected_) {
+        throw IOException("Couldn't send script/function to the remote host because the connection has been closed");
+    }
+
+    const int argCount = args.size();
+    string body = funcName;
+    body.append("\n" + std::to_string(argCount));
+    body.append("\n");
+    body.append(Util::isLittleEndian() ? "1" : "0");
+    
+    string out("API2_LLI ");
+    out.append(Util::convert((int)body.size()));
+    out.append(1, '\n');
+    out.append(body);
+
+
+    // communication protocol format: 
+    // header          : indefinite length
+    // space           : 1 char
+    // body length     : 15 bits
+    // '\n'            : 1 char
+    // argument number : indefinite length, transfer from integer  // body
+    // '\n'            : 1 char                                    // body
+    // is little endian: 1 bits                                    // body
+
+    IO_ERR ret;
+    if (argCount > 0) {
+        for (int i = 0; i < argCount; ++i) {
+            if (args[i]->containNotMarshallableObject()) {
+                throw IOException("The function argument or uploaded object is not marshallable.");
+            }
+        }
+        DataOutputStreamSP outStream = new DataOutputStream(conn_);
+        ConstantMarshallFactory marshallFactory(outStream);
+        bool enableCompress = false;
+        for (int i = 0; i < argCount; ++i) {
+            enableCompress = (args[i]->getForm() == DATA_FORM::DF_TABLE) ? compress_ : false;
+            ConstantMarshall* marshall = marshallFactory.getConstantMarshall(args[i]->getForm());
+            if (i == 0)
+                marshall->start(out.c_str(), out.size(), args[i], true, enableCompress, ret);
+            else
+                marshall->start(args[i], true, enableCompress, ret);
+            marshall->reset();
+            if (ret != OK) {
+                close();
+                throw IOException("Couldn't send function argument to the remote host with IO error type " + std::to_string(ret));
+            }
+        }
+        ret = outStream->flush();
+        if (ret != OK) {
+            close();
+            throw IOException("Failed to marshall code with IO error type " + std::to_string(ret));
+        }
+    } else {
+        size_t actualLength;
+        IO_ERR ret = conn_->write(out.c_str(), out.size(), actualLength);
+        if (ret != OK) {
+            close();
+            throw IOException("Couldn't send script/function to the remote host because the connection has been closed, IO error type " + std::to_string(ret));
+        }
+    }
+    
+    if(asynTask_)
+        return new Void();
+    
+    if (littleEndian_ != (char)Util::isLittleEndian())
+        inputStream_->enableReverseIntegerByteOrder();
+
+    string line;
+    if ((ret = inputStream_->readLine(line)) != OK) {
+        close();
+        throw IOException("Failed to read response header from the socket with IO error type " + std::to_string(ret));
+    }
+    while (line == "MSG") {
+        if ((ret = inputStream_->readString(line)) != OK) {
+            close();
+            throw IOException("Failed to read response msg from the socket with IO error type " + std::to_string(ret));
+        }
+        std::cout << line << std::endl;
+        if ((ret = inputStream_->readLine(line)) != OK) {
+            close();
+            throw IOException("Failed to read response header from the socket with IO error type " + std::to_string(ret));
+        }
+    }
+    vector<string> headers;
+    Util::split(line.c_str(), ' ', headers);
+    if (headers.size() != 3) {
+        close();
+        throw IOException("Received invalid header");
+    }
+    sessionId_ = headers[0];
+    int numObject = atoi(headers[1].c_str());
+
+    if ((ret = inputStream_->readLine(line)) != OK) {
+        close();
+        throw IOException("Failed to read response message from the socket with IO error type " + std::to_string(ret));
+    }
+
+    if (line != "OK") {
+        throw IOException(hostName_+":"+std::to_string(port_)+" Server response: '" + line + "' funcName: '" + funcName + "'");
+    }
+
+    if (numObject == 0) {
+        return new Void();
+    }
+    
+    short flag;
+    if ((ret = inputStream_->readShort(flag)) != OK) {
+        close();
+        throw IOException("Failed to read object flag from the socket with IO error type " + std::to_string(ret));
+    }
+    
+    DATA_FORM form = static_cast<DATA_FORM>(flag >> 8);
+    DATA_TYPE type = static_cast<DATA_TYPE >(flag & 0xff);
+
+    ConstantUnmarshallFactory factory(inputStream_);
+    ConstantUnmarshall* unmarshall = factory.getConstantUnmarshall(form);
+    if(unmarshall == NULL){
+        DLogger::Error("Unknow incoming object form",form,"of type",type);
+        inputStream_->reset(0);
+        conn_->skipAll();
+        return Constant::void_;
+    }
+    if (!unmarshall->start(flag, true, ret)) {
+        unmarshall->reset();
+        close();
+        throw IOException("Failed to parse the incoming object with IO error type " + std::to_string(ret));
+    }
+
+    ConstantSP result = unmarshall->getConstant();
+    unmarshall->reset();
+    return result;
+}
+
+
 ConstantSP DBConnectionImpl::run(const string& script, const string& scriptType, vector<ConstantSP>& args,
             int priority, int parallelism, int fetchSize, bool clearMemory, long seqNum) {
     DLOG("run1",script,"start");
@@ -1453,6 +1591,40 @@ ConstantSP DBConnection::run(const string& funcName, vector<dolphindb::ConstantS
     }
     return NULL;
 }
+
+ConstantSP DBConnection::lowLatencyRequest(const string &funcName, const vector<ConstantSP> &args) {
+    LockGuard<Mutex> LockGuard(&mutex_);
+    if (nodes_.empty() == false) {
+        long seqNo = nextSeqNo();
+        while (closed_ == false) {
+            try {
+                return conn_->lowLatencyRequest(funcName, args);
+            }
+            catch (IOException& e) {
+                if(seqNo > 0)
+                    seqNo = -seqNo;
+                string host;
+                int port = 0;
+                if (connected()) {
+                    ExceptionType type = parseException(e.what(), host, port);
+                    if (type == ET_IGNORE)
+                        return new Void();
+                    else if (type == ET_UNKNOW)
+                        throw;
+                }
+                else {
+                    parseException(e.what(), host, port);
+                }
+                switchDataNode(host, port);
+            }
+        }
+    } else {
+        return conn_->lowLatencyRequest(funcName, args);
+    }
+    return NULL;
+}
+
+
 
 ConstantSP DBConnection::upload(const string& name, const ConstantSP& obj) {
     LockGuard<Mutex> LockGuard(&mutex_);

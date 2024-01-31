@@ -727,6 +727,8 @@ public:
 	 */
 	ConstantSP run(const string& funcName, vector<ConstantSP>& args, int priority=4, int parallelism=2, int fetchSize=0, bool clearMemory = false);
 
+    ConstantSP lowLatencyRequest(const string &funcName, const vector<ConstantSP> &args);
+
 	/**
 	 * upload a local object to the DolphinDB server and assign the given name in the session.
 	 */
