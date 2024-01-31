@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.6)
-set(ProjectName apiDemo)
-project(${ProjectName})
-set(SRC_LIST 
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+project(apiDemo)
+
 set(LINK_LIBS)
 if(USE_OPENSSL)
     add_definitions("-DUSE_OPENSSL=1")
@@ -17,7 +16,7 @@ if(USE_OPENSSL)
     message("openssl crypto lib dir : ${OPENSSL_CRYPTO_LIBRARY}")
 endif()
 if(UNIX)
-    add_compile_options(-std=c++11 -DLINUX -Wall -O0 -g -fPIC -Wl,-rpath,${CMAKE_CURRENT_SOURCE_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/lib)
+    add_compile_options(-std=c++11 -DLINUX -Wall -O3 -fPIC -Wl,-rpath,${CMAKE_CURRENT_SOURCE_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/lib)
     if(ABI EQUAL 0)
         message("set _GLIBCXX_USE_CXX11_ABI to 0")
         add_definitions("-D_GLIBCXX_USE_CXX11_ABI=0")
@@ -50,8 +49,15 @@ include_directories(
 link_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/
 )
-add_executable(${ProjectName} ${SRC_LIST})
-target_link_libraries(${ProjectName}
-    ${LINK_LIBS}
-)
+
+file(GLOB_RECURSE files src/*.cpp)
+foreach(file ${files})
+    string(REGEX MATCH "src/.*" relative_path ${file})
+    string(REGEX REPLACE "src/" "" target_name ${relative_path})
+    string(REGEX REPLACE ".cpp" "" target_name ${target_name})
+
+    add_executable(${target_name} ${file})
+    target_link_libraries(${target_name} ${LINK_LIBS})
+endforeach()
+
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_CURRENT_SOURCE_DIR}/bin/)
