@@ -242,6 +242,20 @@ MultithreadedTableWriter::~MultithreadedTableWriter() {
 }
 
 void MultithreadedTableWriter::waitForThreadCompletion() {
+    {
+        std::cout << "Call Method: MultithreadedTableWriter::waitForThreadCompletion()\n";
+        std::cout << "list(map(size, threads_)) -> [";
+        bool first = true;
+        for (const auto &writerThread : threads_) {
+            if (first)
+                first = false;
+            else
+                std::cout << ", ";
+            std::cout << writerThread.writeQueue.size();
+        }
+        std::cout << "]" << std::endl;
+    }
+
     RWLockGuard<RWLock> guard(&insertRWLock_, true);
     if (exited_)
         return;
@@ -443,7 +457,8 @@ bool MultithreadedTableWriter::SendExecutor::writeAllData(){
         if (size < 1){
             return false;
         }
-        items = writeThread_.writeQueue;
+        // items = writeThread_.writeQueue;
+        items = std::move(writeThread_.writeQueue);
         writeThread_.writeQueue.clear();
     }
     int size = items.size();
@@ -481,15 +496,17 @@ bool MultithreadedTableWriter::SendExecutor::writeAllData(){
             std::vector<ConstantSP> args(1);
             args[0] = writeTable;
             runscript = tableWriter_.scriptTableInsert_;
-            ConstantSP constsp = writeThread_.conn->run(runscript, args);
+            // ConstantSP constsp = writeThread_.conn->run(runscript, args);
+            ConstantSP constsp = writeThread_.conn->lowLatencyRequest(runscript, args);
             runscript.clear();
-            if (constsp->getType() == DT_INT && constsp->getForm() == DF_SCALAR) {
+            if (constsp->getType() == DT_VOID) {
+                ;
+            } else if (constsp->getType() == DT_INT && constsp->getForm() == DF_SCALAR) {
                 int addresult = constsp->getInt();
                 if (addresult != addRowCount) {
                     std::cout << "Rows changed: " << addresult << " / " << addRowCount << std::endl;
                 }
-            }
-            else {
+            } else {
                 std::cout << "None row changed of " << addRowCount << std::endl;
             }
             if (tableWriter_.scriptSaveTable_.empty() == false) {
